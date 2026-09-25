@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spot the Cryptid</title>
+  <style>
+    /* ==========================================================
+       PAGE LAYOUT
+       The page is a dark "letterbox". The game box sits inside it.
+       ========================================================== */
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #0e1116;
+      font-family: "Courier New", Courier, monospace;
+      color: #ffffff;
+      user-select: none;          /* fast clicking must not select text */
+    }
+
+    /* ==========================================================
+       THE GAME BOX
+       JavaScript sets its size and position (see fitCanvasToWindow).
+       --px is "how many CSS pixels one logical game pixel takes up".
+       JavaScript updates it, so every calc(var(--px) * N) below scales
+       together with the pixel art: the text looks the same in a small
+       window and in a 1920x1080 OBS browser source.
+       ========================================================== */
+    #game {
+      --px: 4px;
+      position: absolute;
+      left: 0;
+      top: 0;
+      overflow: hidden;           /* nothing (like a long message) can spill out */
+    }
+
+    /* ==========================================================
+       THE CANVAS
+       Its REAL size is only 320x180 pixels. CSS stretches it to fill the
+       game box. "image-rendering" tells the browser to keep the pixels
+       sharp (nearest-neighbour) instead of blurring them.
+       ========================================================== */
+    #scene {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: crisp-edges;        /* fallback for browsers without "pixelated" */
+      image-rendering: pixelated;          /* Chrome / Edge / Firefox / OBS - last, so it wins */
+      cursor: crosshair;                   /* same cursor everywhere = no hints */
+    }
+
+    /* ==========================================================
+       HUD: hint text in the top-left corner
+       ========================================================== */
+    #hint {
+      position: absolute;
+      top: calc(var(--px) * 2);
+      left: calc(var(--px) * 2);
+      padding: calc(var(--px) * 1) calc(var(--px) * 2);
+      background: rgba(0, 0, 0, 0.6);
+      border: calc(var(--px) * 0.5) solid #ffffff;
+      font-size: calc(var(--px) * 4);
+      font-weight: bold;
+      pointer-events: none;       /* clicks go straight through to the canvas */
+    }
+
+    /* ==========================================================
+       SUCCESS MESSAGE (hidden until the cryptid is found)
+       It sits along the BOTTOM edge and has no dark backdrop, so the
+       revealed cryptid stays fully visible.
+       ========================================================== */
+    #message {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: calc(var(--px) * 6);
+      display: flex;
+      justify-content: center;
+      pointer-events: none;       /* the empty strip beside the panel lets clicks reach the canvas */
+    }
+
+    /* The HTML "hidden" attribute normally hides an element on its own,
+       but our display:flex above would override it, so we say it again. */
+    #message[hidden] {
+      display: none;
+    }
+
+    .panel {
+      pointer-events: auto;       /* only the panel itself catches clicks */
+      max-width: 90%;
+      padding: calc(var(--px) * 3) calc(var(--px) * 4);
+      background: #1c140b;
+      border: calc(var(--px) * 0.75) solid #ffd84a;
+      box-shadow: var(--px) var(--px) 0 #000000;
+      text-align: center;
+    }
+
+    .panel p {
+      margin: 0 0 calc(var(--px) * 2) 0;
+      font-size: calc(var(--px) * 5);
+      font-weight: bold;
+    }
+
+    .panel button {
+      padding: calc(var(--px) * 1.5) calc(var(--px) * 3);
+      font: inherit;
+      font-size: calc(var(--px) * 3.5);
+      font-weight: bold;
+      color: #1c140b;
+      background: #ffd84a;
+      border: calc(var(--px) * 0.5) solid #1c140b;
+      cursor: pointer;
+    }
+
+    /* Pressed: slide into the shadow by exactly one logical pixel. */
+    .panel button:active {
+      transform: translate(var(--px), var(--px));
+    }
+  </style>
+</head>
+<body>
+  <div id="game">
+    <canvas id="scene"></canvas>
+    <!-- The text of these two is filled in by JavaScript (see setHint and
+         showSuccessMessage), so there is only one place to change it. -->
+    <div id="hint"></div>
+    <div id="message" hidden>
+      <div class="panel">
+        <p id="messageText"></p>
+        <button id="playAgainButton" type="button">Play again</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+
+    /* ==========================================================
+       1. SETTINGS
+       ========================================================== */
+
+    // The game is drawn on a tiny 320x180 "logical" canvas (a 16:9 shape).
+    // The browser scales it up, so 1 logical pixel = 1 chunky square on screen.
+    const LOGICAL_WIDTH = 320;
+    const LOGICAL_HEIGHT = 180;
+
+    // Where the ground starts (logical pixels from the top).
+    const HORIZON_Y = 104;
+
+    // Where the far-away treeline starts.
+    const FAR_TREELINE_Y = 82;
+
+    // Extra logical pixels around the cryptid that still count as a hit.
+    // Keeps near-misses fair without turning it into a giant target.
+    const CLICK_PADDING = 2;
+
+    const DEFAULT_HINT = 'Find the hidden cryptid and click it!';
+
+    /* ==========================================================
+       2. COLORS
+       Sprites below are "painted" with these letters.
+       '.' means transparent (nothing is drawn).
+       ========================================================== */
+    const PALETTE = {
+      // scenery
+      'K': '#1c140b', // outline / deep shadow
+      'T': '#5a3a1e', // tree trunk
+      'B': '#7d5433', // trunk highlight
+      'D': '#1f4d2b', // dark leaves
+      'G': '#2f7d3a', // leaves
+      'L': '#5bb04e', // light leaves
+      'H': '#244f31', // far-away forest silhouette
+      'R': '#6e6e78', // rock
+      'P': '#a0a0aa', // rock highlight (pale)
+      'S': '#454550', // rock shadow
+      'W': '#f4f8fb', // cloud
+      // the cryptid while it is hiding
+      'N': '#241a0e', // fur shadow (almost the same as the outline color K)
+      'F': '#3b2b1a', // fur (on purpose: between the trunk colors K and T)
+      'E': '#9c8a48', // eyes: a dull gold - the honest giveaway for sharp eyes
+    };
+
+    // The cryptid's colors once it has been found: bright and obvious.
+    const CRYPTID_FOUND_COLORS = {
+      'N': '#4a2e14',
+      'F': '#9c6b3c',
+      'E': '#ffe066',
+    };
+
+    // Colors painted directly (not through a sprite).
+    const SKY_TOP = '#6fb3e0';
+    const SKY_MIDDLE = '#93cbe9';
+    const SKY_HORIZON = '#c4e5f0';
+    const FAR_FOREST = PALETTE.H;   // solid band under the far treeline
+    const GROUND_SHADE = '#3a7030'; // shadow under the back row of trees
+    const GROUND_MID = '#437f34';
+    const GROUND = '#4b8c3a';
+    const HIGHLIGHT = '#ffd84a';    // box drawn around the found cryptid
+
+    /* ==========================================================
+       3. BACKGROUND DATA
+       Flat horizontal bands, listed top to bottom.
+       ========================================================== */
+    const SKY_BANDS = [
+      { top: 0,  height: 40, color: SKY_TOP },
+      { top: 40, height: 36, color: SKY_MIDDLE },
+      { top: 76, height: 28, color: SKY_HORIZON },   // ends at HORIZON_Y
+    ];
+
+    const GROUND_BANDS = [
+      { top: 104, height: 12, color: GROUND_SHADE }, // back row of trees stands here
+      { top: 116, height: 20, color: GROUND_MID },   // middle row
+      { top: 136, height: 44, color: GROUND },       // front row
+    ];
+
+    // How many pixels each far-away pine is nudged down. Repeats along the
+    // horizon, so the treeline is uneven instead of a perfect zigzag.
+    const FAR_TREE_WOBBLE = [0, 2, 1, 3, 1, 0, 2];
+
+    /* ==========================================================
+       4. SPRITES
+       Each sprite is an array of strings. Every string is one row of
+       pixels and every character is one pixel (see PALETTE above).
+       Keep every row of a sprite the same length; checkSpriteData()
+       warns in the console (F12) if one is off.
+       ========================================================== */
+    const SPRITES = {
+
+      // Tall pine tree, 15 wide x 25 tall
+      pine: [
+        '.......D.......',
+        '......DLD......',
+        '......DGD......',
+        '.....DLGGD.....',
+        '.....DGGGD.....',
+        '....DLGGGGD....',
+        '....DGGGGGD....',
+        '...DDGGGGGDD...',
+        '....DLGGGGD....',
+        '...DGLGGGGGD...',
+        '...DGGGGGGGD...',
+        '..DLGGGGGGGGD..',
+        '..DGGGGGGGGGD..',
+        '.DDDGGGGGGGDDD.',
+        '..DLGGGGGGGGD..',
+        '.DGGLGGGGGGGGD.',
+        '.DGGGGGGGGGGGD.',
+        'DLGGGGGGGGGGGGD',
+        'DGGGGGGGGGGGGGD',
+        'DDDDDDDDDDDDDDD',
+        '......TBT......',
+        '......TBT......',
+        '......TBT......',
+        '......TBT......',
+        '.....KTBTK.....',
+      ],
+
+      // Round leafy oak with a thick trunk, 21 wide x 26 tall
+      oak: [
+        '.......DDDDDDD.......',
+        '.....DDGGGGGGGDD.....',
+        '....DGGLLGGGGGGGD....',
+        '...DGLLGGGGGGLGGGD...',
+        '..DGGLGGGGGGGGGGGGD..',
+        '..DGGGGGGGGGGLGGGGD..',
+        '.DGGGGGGLGGGGGGGGGGD.',
+        '.DGLGGGGGGGGGGGGGGGD.',
+        'DGGGGGGGGGGGGGGGGGGGD',
+        'DGGGGGGGGGGGGGGLGGGGD',
+        'DGGGGGGGLGGGGGGGGGGGD',
+        'DGGGGGGGGGGGGGGGGGGGD',
+        '.DGGGGGGGGGGGGGGGGGD.',
+        '.DDGGGGGGGGGGGGGGGDD.',
+        '..DDGGGGDDDDDGGGGDD..',
+        '...DDDDDKTBTKDDDDD...',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '........KTBTK........',
+        '.......KKTBTKK.......',
+      ],
+
+      // Bush, 12 wide x 7 tall
+      bush: [
+        '....DDDD....',
+        '..DDGLGGDD..',
+        '.DGGLGGGGGD.',
+        'DGLGGGGGGLGD',
+        'DGGGGGGGGGGD',
+        'DDGGGGGGGGDD',
+        '.DDDDDDDDDD.',
+      ],
+
+      // Rock, 9 wide x 5 tall
+      rock: [
+        '..SPPRS..',
+        '.SPRRRRS.',
+        'SPRRRRRSS',
+        'SRRRRSSSS',
+        '.SSSSSSS.',
+      ],
+
+      // Grass tuft, 5 wide x 3 tall
+      grass: [
+        '.L.L.',
+        'LLGLL',
+        '.GGG.',
+      ],
+
+      // Cloud, 10 wide x 4 tall
+      cloud: [
+        '....WWW...',
+        '..WWWWWWW.',
+        '.WWWWWWWW.',
+        'WWWWWWWWWW',
+      ],
+
+      // Tiny distant pine used for the far treeline, 7 wide x 7 tall
+      farPine: [
+        '...H...',
+        '..HHH..',
+        '..HHH..',
+        '.HHHHH.',
+        '.HHHHH.',
+        'HHHHHHH',
+        'HHHHHHH',
+      ],
+
+      // THE CRYPTID: a sasquatch, 9 wide x 15 tall.
+      // No black outline on purpose - a soft, dark silhouette hides better.
+      sasquatch: [
+        '..NFFFN..',
+        '.NFFFFFN.',
+        '.NFEFEFN.',
+        '.NFFFFFN.',
+        '..NFFFN..',
+        '.NFFFFFN.',
+        'NFFFFFFFN',
+        'NFNFFFNFN',
+        'NFNFFFNFN',
+        'NFNFFFNFN',
+        'NFNFFFNFN',
+        '.NNFFFNN.',
+        '..NFNFN..',
+        '..NFNFN..',
+        '.NNN.NNN.',
+      ],
+    };
+
+    /* ==========================================================
+       5. THE SCENE  (data, not code!)
+       Change the numbers here to move things around.
+       Every object in the forest: which sprite to use and the top-left
+       corner of that sprite in logical pixels (x to the right, y down).
+       Items are drawn in list order, so an item lower in the list
+       appears IN FRONT of the items above it.
+       The cryptid is just another item, flagged with cryptid: true.
+       ========================================================== */
+    const SCENE = [
+      // --- Sky ---
+      { sprite: 'cloud', x: 28,  y: 14 },
+      { sprite: 'cloud', x: 150, y: 28 },
+      { sprite: 'cloud', x: 252, y: 10 },
+
+      // --- Back row: trees standing in the shade at the horizon ---
+      { sprite: 'pine', x: 2,   y: 84 },
+      { sprite: 'oak',  x: 26,  y: 83 },
+      { sprite: 'pine', x: 58,  y: 86 },
+      { sprite: 'pine', x: 90,  y: 82 },
+      { sprite: 'oak',  x: 118, y: 85 },
+      { sprite: 'pine', x: 152, y: 84 },
+      { sprite: 'pine', x: 176, y: 87 },
+
+      // THE HIDDEN CRYPTID. It is listed BEFORE the oak on the next line, so
+      // the oak's canopy covers the top of its head and the trunk covers its
+      // right half. Only the left side of its head and shoulder peeks out.
+      // The bush after the oak then covers its legs.
+      // Tuning: x + 1 or + 2 hides more of it, x - 1 shows more of it.
+      { sprite: 'sasquatch', x: 198, y: 96, cryptid: true, name: 'Sasquatch' },
+
+      { sprite: 'oak',  x: 196, y: 82 },   // trunk at x 204-208 hides the right half
+      { sprite: 'bush', x: 195, y: 104 },  // hides the legs and feet
+
+      { sprite: 'pine', x: 224, y: 85 },
+      { sprite: 'pine', x: 254, y: 83 },
+      { sprite: 'oak',  x: 280, y: 86 },
+      { sprite: 'pine', x: 306, y: 84 },
+
+      // --- Middle row ---
+      { sprite: 'grass', x: 14,  y: 118 },
+      { sprite: 'rock',  x: 40,  y: 122 },
+      { sprite: 'bush',  x: 70,  y: 124 },
+      { sprite: 'pine',  x: 100, y: 112 },
+      { sprite: 'grass', x: 130, y: 126 },
+      { sprite: 'bush',  x: 150, y: 128 },
+      { sprite: 'rock',  x: 178, y: 130 },
+      { sprite: 'grass', x: 210, y: 120 },
+      { sprite: 'pine',  x: 232, y: 116 },
+      { sprite: 'bush',  x: 262, y: 126 },
+      { sprite: 'grass', x: 290, y: 124 },
+
+      // --- Front row (closest to the viewer, drawn last) ---
+      { sprite: 'grass', x: 6,   y: 156 },
+      { sprite: 'pine',  x: 20,  y: 146 },
+      { sprite: 'rock',  x: 52,  y: 160 },
+      { sprite: 'bush',  x: 80,  y: 158 },
+      { sprite: 'grass', x: 112, y: 166 },
+      { sprite: 'oak',   x: 134, y: 148 },
+      { sprite: 'rock',  x: 172, y: 168 },
+      { sprite: 'grass', x: 200, y: 160 },
+      { sprite: 'bush',  x: 220, y: 164 },
+      { sprite: 'pine',  x: 250, y: 152 },
+      { sprite: 'grass', x: 284, y: 170 },
+      { sprite: 'rock',  x: 300, y: 162 },
+    ];
+
+    /* ==========================================================
+       6. DRAWING HELPERS
+       ========================================================== */
+    const gameElement = document.getElementById('game');
+    const canvas = document.getElementById('scene');
+    const ctx = canvas.getContext('2d');
+
+    // The canvas's REAL size is the tiny logical size. CSS scales it up.
+    canvas.width = LOGICAL_WIDTH;
+    canvas.height = LOGICAL_HEIGHT;
+
+    // Fill a rectangle with a color (saves typing fillStyle every time).
+    function fillRect(x, y, width, height, color) {
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, width, height);
+    }
+
+    // Draw a sprite (array of strings) with its top-left corner at (x, y).
+    // Each character becomes one 1x1 logical pixel. "palette" says which
+    // color each letter is; it is the normal PALETTE unless told otherwise.
+    function drawSprite(sprite, x, y, palette = PALETTE) {
+      for (let row = 0; row < sprite.length; row++) {
+        const line = sprite[row];
+        for (let col = 0; col < line.length; col++) {
+          const color = palette[line[col]];
+          if (!color) continue;   // '.' (or an unknown letter) draws nothing
+          fillRect(x + col, y + row, 1, 1, color);
+        }
+      }
+    }
+
+    function spriteWidth(sprite) {
+      return sprite[0].length;
+    }
+
+    function spriteHeight(sprite) {
+      return sprite.length;
+    }
+
+    // Draw a 1-pixel-thick rectangle outline (four thin fillRects).
+    function drawRectOutline(x, y, width, height, color) {
+      fillRect(x, y, width, 1, color);                  // top edge
+      fillRect(x, y + height - 1, width, 1, color);     // bottom edge
+      fillRect(x, y, 1, height, color);                 // left edge
+      fillRect(x + width - 1, y, 1, height, color);     // right edge
+    }
+
+    // Paint a list of full-width horizontal bands.
+    function drawBands(bands) {
+      for (const band of bands) {
+        fillRect(0, band.top, LOGICAL_WIDTH, band.height, band.color);
+      }
+    }
+
+    // A row of tiny pines along the horizon, standing on a solid dark band.
+    function drawFarTreeline() {
+      const spacing = 6;   // 6 apart with a 7-wide sprite = no gaps
+      const count = Math.ceil(LOGICAL_WIDTH / spacing) + 1;
+      for (let i = 0; i < count; i++) {
+        const x = i * spacing - 3;
+        const wobble = FAR_TREE_WOBBLE[i % FAR_TREE_WOBBLE.length];
+        drawSprite(SPRITES.farPine, x, FAR_TREELINE_Y + wobble);
+      }
+      const bandTop = FAR_TREELINE_Y + spriteHeight(SPRITES.farPine);
+      fillRect(0, bandTop, LOGICAL_WIDTH, HORIZON_Y - bandTop, FAR_FOREST);
+    }
+
+    // Sky, distant forest and ground. Everything in SCENE is drawn on top.
+    function drawBackground() {
+      drawBands(SKY_BANDS);
+      drawFarTreeline();
+      drawBands(GROUND_BANDS);
+    }
+
+    // Draw the whole picture from scratch.
+    function drawScene() {
+      drawBackground();
+      for (const item of SCENE) {
+        const sprite = SPRITES[item.sprite];
+        if (!sprite) continue;   // checkSceneData() already warned about this
+        drawSprite(sprite, item.x, item.y);
+      }
+    }
+
+    // After a win: draw the cryptid on top of everything (so the tree and
+    // bush no longer hide it), in its bright colors, with a box around it.
+    function revealCryptid(item) {
+      const sprite = SPRITES[item.sprite];
+      drawSprite(sprite, item.x, item.y, CRYPTID_FOUND_COLORS);
+      drawRectOutline(
+        item.x - CLICK_PADDING,
+        item.y - CLICK_PADDING,
+        spriteWidth(sprite) + CLICK_PADDING * 2,
+        spriteHeight(sprite) + CLICK_PADDING * 2,
+        HIGHLIGHT
+      );
+    }
+
+    /* ==========================================================
+       7. DATA CHECKS (developer helpers)
+       These run once at start-up and warn in the browser console (F12)
+       about typos in the art or the scene list, which are easy to make.
+       ========================================================== */
+    // The row length that shows up most often in a sprite. That is almost
+    // certainly the width the artist meant, so a typo in ANY row (even
+    // row 0) gets named, instead of blaming every other row.
+    function mostCommonRowWidth(sprite) {
+      const counts = {};   // row length -> how many rows have that length
+      let bestWidth = sprite[0].length;
+      for (const line of sprite) {
+        counts[line.length] = (counts[line.length] || 0) + 1;
+        if (counts[line.length] > counts[bestWidth]) {
+          bestWidth = line.length;
+        }
+      }
+      return bestWidth;
+    }
+
+    function checkSpriteData() {
+      for (const name in SPRITES) {
+        const sprite = SPRITES[name];
+        const expectedWidth = mostCommonRowWidth(sprite);
+        for (let row = 0; row < sprite.length; row++) {
+          const line = sprite[row];
+          if (line.length !== expectedWidth) {
+            console.warn('Sprite "' + name + '" row ' + row + ' is ' +
+              line.length + ' wide, expected ' + expectedWidth);
+          }
+          for (const letter of line) {
+            if (letter !== '.' && !PALETTE[letter]) {
+              console.warn('Sprite "' + name + '" row ' + row +
+                ' uses a letter that is not in PALETTE: "' + letter + '"');
+            }
+          }
+        }
+      }
+    }
+
+    function checkSceneData() {
+      for (const item of SCENE) {
+        if (!SPRITES[item.sprite]) {
+          console.warn('SCENE item uses an unknown sprite name: "' + item.sprite + '"');
+        }
+      }
+    }
+
+    /* ==========================================================
+       8. GAME STATE, CLICK HANDLING AND MESSAGES
+       ========================================================== */
+    const hintElement = document.getElementById('hint');
+    const messageElement = document.getElementById('message');
+    const messageTextElement = document.getElementById('messageText');
+    const playAgainButton = document.getElementById('playAgainButton');
+
+    const gameState = {
+      found: false,   // is the round over? (with several cryptids later, each
+                      // SCENE item would get its own "found" instead)
+    };
+
+    function setHint(text) {
+      hintElement.textContent = text;
+    }
+
+    function showSuccessMessage(item) {
+      messageTextElement.textContent = 'You found the ' + item.name + '!';
+      messageElement.hidden = false;
+    }
+
+    function hideSuccessMessage() {
+      messageElement.hidden = true;
+    }
+
+    // Keep a number between min and max (inclusive).
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    // Convert a mouse event's screen position into logical canvas pixels.
+    // The canvas is scaled up on screen, so we divide by its on-screen size
+    // and multiply by its logical size. This works at any zoom or scale.
+    // The clamp keeps a click on the very last edge inside 0..319 / 0..179.
+    function getLogicalClickPosition(event) {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((event.clientX - rect.left) / rect.width * LOGICAL_WIDTH);
+      const y = Math.floor((event.clientY - rect.top) / rect.height * LOGICAL_HEIGHT);
+      return {
+        x: clamp(x, 0, LOGICAL_WIDTH - 1),
+        y: clamp(y, 0, LOGICAL_HEIGHT - 1),
+      };
+    }
+
+    // Is the logical point (x, y) inside this scene item's box
+    // (plus a little CLICK_PADDING on every side)? The whole box counts,
+    // even the parts hidden behind the tree and bush - on purpose, so the
+    // target is fair and so a chat guess can use the exact same rule later.
+    function isInsideItem(item, x, y) {
+      const sprite = SPRITES[item.sprite];
+      if (!sprite) return false;
+      const left = item.x - CLICK_PADDING;
+      const top = item.y - CLICK_PADDING;
+      const right = item.x + spriteWidth(sprite) + CLICK_PADDING;
+      const bottom = item.y + spriteHeight(sprite) + CLICK_PADDING;
+      return x >= left && x < right && y >= top && y < bottom;
+    }
+
+    // The heart of the game. Takes a guess in logical pixels and returns
+    // true if it hits a cryptid. Mouse clicks call this now. In a later
+    // step, Twitch chat guesses will be turned into logical pixels and
+    // passed to this very same function.
+    function checkGuess(x, y) {
+      if (gameState.found) return false;   // round is over, ignore guesses
+
+      const hitItem = SCENE.find(function (item) {
+        return item.cryptid && isInsideItem(item, x, y);
+      });
+
+      if (!hitItem) {
+        setHint('Nothing there... keep looking!');
+        return false;
+      }
+
+      gameState.found = true;
+      drawScene();               // clean repaint...
+      revealCryptid(hitItem);    // ...then the cryptid on top, lit up
+      setHint('Found it!');
+      showSuccessMessage(hitItem);
+      return true;
+    }
+
+    function handleCanvasClick(event) {
+      const position = getLogicalClickPosition(event);
+      checkGuess(position.x, position.y);
+    }
+
+    // Start (or restart) a round: hide the message, reset the hint, redraw.
+    function resetGame() {
+      gameState.found = false;
+      hideSuccessMessage();
+      setHint(DEFAULT_HINT);
+      drawScene();
+    }
+
+    /* ==========================================================
+       9. SCALING + START
+       ========================================================== */
+
+    // Make the game box as big as the window allows while keeping 16:9.
+    // We only use WHOLE-NUMBER scales (2x, 3x, 4x...) so every logical
+    // pixel becomes an identical square on screen: perfectly crisp.
+    // Example: a 1920x1080 window (or OBS browser source) gives exactly 6x.
+    function fitCanvasToWindow() {
+      // Windows is often set to 125% or 150% display scaling, which makes
+      // one CSS pixel bigger than one real screen pixel. We do the maths in
+      // real screen pixels so the squares stay exact on those screens too.
+      const dpr = window.devicePixelRatio || 1;
+      const screenWidth = window.innerWidth * dpr;
+      const screenHeight = window.innerHeight * dpr;
+
+      const scale = Math.max(1, Math.floor(Math.min(
+        screenWidth / LOGICAL_WIDTH,
+        screenHeight / LOGICAL_HEIGHT
+      )));
+
+      // Size of the game box in CSS pixels.
+      gameElement.style.width = (LOGICAL_WIDTH * scale / dpr) + 'px';
+      gameElement.style.height = (LOGICAL_HEIGHT * scale / dpr) + 'px';
+
+      // Centre it, snapped to whole screen pixels (no half-pixel edges).
+      const leftoverWidth = screenWidth - LOGICAL_WIDTH * scale;
+      const leftoverHeight = screenHeight - LOGICAL_HEIGHT * scale;
+      gameElement.style.left = (Math.floor(leftoverWidth / 2) / dpr) + 'px';
+      gameElement.style.top = (Math.floor(leftoverHeight / 2) / dpr) + 'px';
+
+      // Tell the CSS how big one logical pixel is, so the text scales too.
+      gameElement.style.setProperty('--px', (scale / dpr) + 'px');
+    }
+
+    canvas.addEventListener('click', handleCanvasClick);
+    playAgainButton.addEventListener('click', resetGame);
+    window.addEventListener('resize', fitCanvasToWindow);
+
+    checkSpriteData();
+    checkSceneData();
+    fitCanvasToWindow();
+    resetGame();   // sets the hint text and draws the first round
+  </script>
+</body>
+</html>
