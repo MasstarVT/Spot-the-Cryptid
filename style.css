@@ -1,0 +1,427 @@
+/* ==========================================================
+   style.css  -  HOW THE PAGE LOOKS
+
+   Every size here is calc(var(--px) * N), meaning "N logical pixels".
+   game.js sets --px to the size of one logical pixel on screen, so the
+   text, boxes and grid lines grow and shrink with the pixel art: the
+   page looks the same in a small window and in a 1920x1080 OBS source.
+
+   SCREEN LAYOUT (logical pixels on the 320x180 picture):
+     edges (0-6 px deep)  grid labels A-P and 1-9          (grid.js)
+     top left             round timer + info               #roundBox
+     top middle           winner banner, notices, debug    #centerTop
+     top right            top-5 leaderboard                #leaderboard
+     bottom left          recent guesses                   #feed
+     bottom right         chat connection + key help       #status
+
+   KEEP-OUT ZONE: the back row of trees, where the cryptid hides, sits
+   between y 78 and y 124. Top boxes start at y 8 and may be at most 68
+   tall (so they end by y 76); bottom boxes start 8 from the bottom and
+   may be at most 46 tall (so they start at y 126 or lower). No text can
+   ever cover a hiding (or revealed) cryptid.
+
+   Written for older OBS versions too: no CSS max(), no "inset", no
+   flexbox "gap" (margins are used instead).
+   ========================================================== */
+
+/* Sizes include padding and border: easier to reason about. */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* The "hidden" attribute must always win, even over display: flex. */
+[hidden] {
+  display: none !important;
+}
+
+/* ----------------------------------------------------------
+   PAGE AND GAME BOX (from Step 1)
+   ---------------------------------------------------------- */
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0e1116;
+  font-family: "Courier New", Courier, monospace;
+  color: #ffffff;
+  user-select: none;          /* fast clicking must not select text */
+}
+
+/* JavaScript sets the game box's size, position and --px
+   (see fitCanvasToWindow in game.js). */
+#game {
+  --px: 4px;
+  --cell: 20;                 /* grid cell size; game.js copies Grid.CELL_SIZE here */
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: hidden;           /* nothing (like a long name) can spill out */
+}
+
+/* The canvas is really only 320x180. CSS stretches it and
+   "image-rendering" keeps the pixels sharp instead of blurry. */
+#scene {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: crisp-edges;   /* fallback for older browsers */
+  image-rendering: pixelated;     /* Chrome / Edge / Firefox / OBS - last, so it wins */
+  cursor: crosshair;              /* same cursor everywhere = no hints */
+}
+
+/* ----------------------------------------------------------
+   THE GRID
+   Lines are two repeating gradients (no extra elements): a third of an
+   art pixel thick (2 screen pixels at 6x) and 22% white, so they never
+   hide the art. Press G to hide the whole grid.
+   ---------------------------------------------------------- */
+#grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;       /* clicks go straight through to the canvas */
+  --line: calc(var(--px) * 0.34);
+  --line-color: rgba(255, 255, 255, 0.22);
+  background-image:
+    linear-gradient(to right, var(--line-color) var(--line), transparent var(--line)),
+    linear-gradient(to bottom, var(--line-color) var(--line), transparent var(--line));
+  background-size: calc(var(--px) * var(--cell)) calc(var(--px) * var(--cell));
+}
+
+/* A-P along the top and bottom, 1-9 down both sides. grid.js sets --x
+   and --y (logical pixels) on each label: that is its centre. The dark
+   backing keeps them readable on the pale sky. */
+.grid-label {
+  position: absolute;
+  left: calc(var(--px) * var(--x));
+  top: calc(var(--px) * var(--y));
+  transform: translate(-50%, -50%);
+  min-width: calc(var(--px) * 3.5);
+  padding: calc(var(--px) * 0.3) calc(var(--px) * 0.5);
+  font-size: calc(var(--px) * 3.5);
+  font-weight: bold;
+  line-height: 1;
+  text-align: center;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/* The mid-round hint lights up a few column letters. */
+.grid-label.is-hint {
+  color: #1c140b;
+  background: #ffd84a;
+}
+
+/* ----------------------------------------------------------
+   HUD BOXES (shared look)
+   ---------------------------------------------------------- */
+.hud-box {
+  position: absolute;
+  margin: 0;
+  padding: calc(var(--px) * 1) calc(var(--px) * 2);
+  background: rgba(0, 0, 0, 0.6);
+  border: calc(var(--px) * 0.5) solid rgba(255, 255, 255, 0.85);
+  font-size: calc(var(--px) * 3.5);
+  font-weight: bold;
+  line-height: 1.25;
+  overflow: hidden;
+  pointer-events: none;       /* clicks go through to the canvas */
+}
+
+/* Top left: timer and round info */
+#roundBox {
+  top: calc(var(--px) * 8);
+  left: calc(var(--px) * 8);
+  max-width: calc(var(--px) * 82);
+  max-height: calc(var(--px) * 68);   /* keep-out zone: ends by y 76 */
+}
+
+#timer {
+  font-size: calc(var(--px) * 5);
+  color: #ffd84a;
+}
+
+#timer.is-low {
+  color: #ff6b5a;
+}
+
+#timer.is-paused {
+  font-size: calc(var(--px) * 3.5);
+  color: #aab4c0;
+}
+
+#hint {
+  margin-top: calc(var(--px) * 1);
+  white-space: pre-line;       /* "\n" in the text starts a new line */
+  overflow-wrap: anywhere;     /* a very long name wraps instead of being cut off */
+}
+
+/* Top right: leaderboard */
+#leaderboard {
+  top: calc(var(--px) * 8);
+  right: calc(var(--px) * 8);
+  width: calc(var(--px) * 80);
+  max-height: calc(var(--px) * 68);   /* keep-out zone: ends by y 76 */
+}
+
+.hud-title {
+  color: #ffd84a;
+  margin-bottom: calc(var(--px) * 1);
+}
+
+#scoreList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#scoreList li {
+  display: flex;
+  white-space: nowrap;
+}
+
+.score-rank {
+  flex-shrink: 0;
+  width: calc(var(--px) * 5);
+  color: #ffd84a;
+}
+
+/* Long names end in "..." instead of pushing the points off the box. */
+.score-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-right: calc(var(--px) * 2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.score-points {
+  flex-shrink: 0;
+  color: #ffd84a;
+}
+
+.score-empty {
+  font-weight: normal;
+  opacity: 0.75;
+}
+
+/* Top middle: winner banner, notices and the debug box, stacked */
+#centerTop {
+  position: absolute;
+  top: calc(var(--px) * 8);
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(var(--px) * 132);
+  max-height: calc(var(--px) * 68);   /* keep-out zone: ends by y 76 */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+
+#centerTop > * + * {
+  margin-top: calc(var(--px) * 2);    /* space between stacked boxes */
+}
+
+#centerTop .hud-box {
+  position: static;           /* stacked by the flex column instead */
+}
+
+/* The winner banner (Step 1's success panel) */
+.panel {
+  max-width: 100%;
+  padding: calc(var(--px) * 3) calc(var(--px) * 4);
+  background: #1c140b;
+  border: calc(var(--px) * 0.75) solid #ffd84a;
+  box-shadow: var(--px) var(--px) 0 #000000;
+  text-align: center;
+}
+
+#bannerTitle {
+  margin: 0;
+  font-size: calc(var(--px) * 5);
+  font-weight: bold;
+  overflow-wrap: anywhere;    /* very long names wrap instead of spilling */
+}
+
+#bannerDetail {
+  margin: calc(var(--px) * 1.5) 0 0 0;
+  font-size: calc(var(--px) * 3.5);
+  font-weight: bold;
+  color: #ffe9a8;
+}
+
+#bannerDetail:empty {
+  display: none;
+}
+
+/* Bottom left: recent guesses */
+#feed {
+  bottom: calc(var(--px) * 8);
+  left: calc(var(--px) * 8);
+  max-width: calc(var(--px) * 120);
+  max-height: calc(var(--px) * 46);   /* keep-out zone: starts at y 126 or lower */
+  list-style: none;
+}
+
+#feed:empty {
+  display: none;
+}
+
+#feed li {
+  display: flex;
+  white-space: nowrap;
+}
+
+#feed li span {
+  margin-right: calc(var(--px) * 2);
+}
+
+.feed-name {
+  max-width: calc(var(--px) * 60);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feed-cell {
+  color: #9fd3ff;
+}
+
+.feed-hit .feed-result {
+  color: #ffd84a;
+}
+
+.feed-miss .feed-result {
+  color: #ff8a7a;
+  font-weight: normal;
+}
+
+.feed-info .feed-result {
+  color: #c8c8c8;
+  font-weight: normal;
+}
+
+/* Bottom right: connection status and key help */
+#status {
+  bottom: calc(var(--px) * 8);
+  right: calc(var(--px) * 8);
+  max-width: calc(var(--px) * 110);
+  max-height: calc(var(--px) * 46);   /* keep-out zone: starts at y 126 or lower */
+  font-size: calc(var(--px) * 3);
+  text-align: right;
+}
+
+/* A coloured dot in front of the connection text */
+#connection::before {
+  content: "\25CF  ";
+}
+
+.status-connected::before  { color: #5bd45b; }
+.status-connecting::before { color: #ffd84a; }
+.status-warning::before    { color: #ff9f40; }
+.status-retrying::before,
+.status-stopped::before    { color: #ff6a5a; }
+.status-offline::before    { color: #9a9a9a; }
+
+#keyHelp {
+  margin-top: calc(var(--px) * 0.5);
+  font-weight: normal;
+  opacity: 0.75;
+}
+
+/* ----------------------------------------------------------
+   FORMS (channel box, debug box) - the only things you can click
+   besides the canvas
+   ---------------------------------------------------------- */
+#channelForm {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+
+#channelForm label {
+  display: block;
+  margin-bottom: calc(var(--px) * 2);
+  font-size: calc(var(--px) * 5);
+  font-weight: bold;
+  color: #ffd84a;
+}
+
+#channelForm button {
+  margin-left: calc(var(--px) * 1.5);
+}
+
+#channelError {
+  margin: calc(var(--px) * 2) 0 0 0;
+  min-height: calc(var(--px) * 4);
+  font-size: calc(var(--px) * 3);
+  color: #ff8a7a;
+}
+
+.form-small {
+  margin: calc(var(--px) * 1) 0 0 0;
+  font-size: calc(var(--px) * 2.8);
+  opacity: 0.8;
+}
+
+#debugForm {
+  display: flex;
+  align-items: center;
+  pointer-events: auto;
+}
+
+#debugForm > * + * {
+  margin-left: calc(var(--px) * 1.5);
+}
+
+#debugInfo {
+  font-size: calc(var(--px) * 2.8);
+  font-weight: normal;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+input {
+  font: inherit;
+  font-size: calc(var(--px) * 4);
+  padding: calc(var(--px) * 1) calc(var(--px) * 1.5);
+  border: calc(var(--px) * 0.5) solid #ffd84a;
+  background: #0e1116;
+  color: #ffffff;
+  user-select: text;          /* the page turns selection off; inputs need it */
+}
+
+#channelInput {
+  width: calc(var(--px) * 56);
+}
+
+#debugInput {
+  width: calc(var(--px) * 50);
+  font-size: calc(var(--px) * 3);
+}
+
+button {
+  padding: calc(var(--px) * 1.5) calc(var(--px) * 3);
+  font: inherit;
+  font-size: calc(var(--px) * 3.5);
+  font-weight: bold;
+  color: #1c140b;
+  background: #ffd84a;
+  border: calc(var(--px) * 0.5) solid #1c140b;
+  cursor: pointer;
+}
+
+#debugForm button {
+  padding: calc(var(--px) * 0.5) calc(var(--px) * 1.5);
+  font-size: calc(var(--px) * 3);
+}
+
+/* Pressed: slide into the shadow by one logical pixel (from Step 1). */
+button:active {
+  transform: translate(var(--px), var(--px));
+}
