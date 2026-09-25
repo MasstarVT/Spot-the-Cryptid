@@ -1,0 +1,4 @@
+# Store LF line endings in the repo and check out LF on every machine.
+# This overrides any core.autocrlf setting, so Git stops warning that
+# LF will be replaced by CRLF.
+* text=auto eol=lf
